@@ -209,17 +209,30 @@ function settleStake(room) {
 
   const payouts = [];
   let paidTotal = 0;
-  prizes.forEach((pr, i) => {
-    const player = ranked[i];
-    if (!player || !player.username || !users[player.username]) return;
-    // amount 0 on 1st with single prize = full pot
-    let amt = Number(pr.amount) || 0;
-    if (amt <= 0 && i === 0 && prizes.length === 1) amt = pot;
-    if (amt <= 0) return;
-    users[player.username].balance = (users[player.username].balance || 0) + amt;
-    paidTotal += amt;
-    payouts.push({ name: player.name, label: pr.label, amount: amt });
-  });
+
+  // 2 players (or no custom prizes): winner carries all
+  const twoPlayer = room.players.length <= 2;
+  const useFullPot = twoPlayer || !room.prizes || room.prizes.length <= 1 ||
+    (room.prizes.length === 1 && !(Number(room.prizes[0].amount) > 0));
+
+  if (useFullPot) {
+    const player = ranked[0];
+    if (player && player.username && users[player.username] && pot > 0) {
+      users[player.username].balance = (users[player.username].balance || 0) + pot;
+      paidTotal = pot;
+      payouts.push({ name: player.name, label: "1ST", amount: pot });
+    }
+  } else {
+    prizes.forEach((pr, i) => {
+      const player = ranked[i];
+      if (!player || !player.username || !users[player.username]) return;
+      let amt = Number(pr.amount) || 0;
+      if (amt <= 0) return;
+      users[player.username].balance = (users[player.username].balance || 0) + amt;
+      paidTotal += amt;
+      payouts.push({ name: player.name, label: pr.label, amount: amt });
+    });
+  }
   saveUsers(users);
 
   room.potPaid = paidTotal;
@@ -518,10 +531,10 @@ io.on("connection", (socket) => {
 
     room.players.forEach(p => { room.hands[p.id] = []; });
 
-    // Pre-deal into temp, then reveal one-by-one via client animation;
-    // server holds final hands and sends dealing_start with ordered cards
-    const dealOrder = []; // { playerId, card }
-    for (let round = 0; round < 5; round++) {
+    // 2 players → 5 cards each; 3+ players → 3 cards each (49-card deck)
+    const cardsEach = room.players.length <= 2 ? 5 : 3;
+    const dealOrder = [];
+    for (let round = 0; round < cardsEach; round++) {
       for (const p of room.players) {
         if (room.deck.length) {
           const card = room.deck.pop();
@@ -632,17 +645,14 @@ io.on("connection", (socket) => {
       advanceTurn(room); broadcastRoom(code); startTurnTimer(code);
       return;
     }
+    // No card to play → must pick market → turn ALWAYS passes to next player
+    // (even if the drawn card could be played)
     if (room.deck.length === 0) { endByCount(room); broadcastRoom(code); return; }
     hand.push(room.deck.pop());
-    const drawn = hand[hand.length - 1];
-    const top = room.discard[room.discard.length - 1];
-    if (!(drawn.shape === top.shape || drawn.num === top.num)) {
-      room.effect = room.players[playerIdx].name + " drew (no play)";
-      advanceTurn(room); broadcastRoom(code); startTurnTimer(code);
-    } else {
-      room.effect = room.players[playerIdx].name + " drew – can play";
-      broadcastRoom(code); startTurnTimer(code);
-    }
+    room.effect = room.players[playerIdx].name + " drew from market – next player";
+    advanceTurn(room);
+    broadcastRoom(code);
+    startTurnTimer(code);
   });
 
   socket.on("pass_turn", () => {
