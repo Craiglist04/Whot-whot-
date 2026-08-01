@@ -41,6 +41,38 @@
     }
     .timer-bar.warn > div { background: #f59e0b; }
     .timer-bar.danger > div { background: #ef4444; }
+    @keyframes dealFly {
+      0% { transform: translate(0,0) scale(0.4); opacity: 0; }
+      40% { opacity: 1; }
+      100% { transform: translate(var(--dx), var(--dy)) scale(1); opacity: 1; }
+    }
+    @keyframes shufflePulse {
+      0%, 100% { transform: rotate(0deg) scale(1); }
+      25% { transform: rotate(-8deg) scale(1.05); }
+      75% { transform: rotate(8deg) scale(1.05); }
+    }
+    .deal-overlay {
+      display: none; position: fixed; inset: 0; background: #0c1220f2; z-index: 80;
+      align-items: center; justify-content: center; flex-direction: column; gap: 12px;
+    }
+    .deal-overlay.show { display: flex; }
+    .deal-overlay h2 { color: #fbbf24; }
+    .shuffle-deck {
+      width: 70px; height: 100px; border-radius: 8px;
+      background: linear-gradient(145deg,#1e3a5f,#0f172a); border: 2px solid #334155;
+      animation: shufflePulse 0.4s ease-in-out infinite;
+    }
+    .deal-card {
+      position: fixed; width: 56px; height: 80px; border-radius: 6px;
+      background: #faf7f2; color: #7f1d1d; border: 1px solid #c4b5a5;
+      font-weight: 800; font-size: 0.9rem; z-index: 90;
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
+      animation: dealFly 0.35s ease-out forwards;
+    }
+    .prize-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+    .prize-row input { margin-bottom: 0; }
+    .prize-row label { font-size: 0.8rem; color: #94a3b8; width: 40px; }
     .opponents { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 12px; }
     .opp { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 8px 12px; min-width: 80px; text-align: center; font-size: 0.8rem; }
     .opp.active { border-color: #22c55e; }
@@ -108,6 +140,13 @@
       <div class="box">
         <h3>Create Room</h3>
         <input id="createStake" type="number" placeholder="Table stake (₦) e.g. 200" value="200" />
+        <div style="font-size:0.8rem;color:#94a3b8;margin:8px 0 6px">Prize positions (for 2+ players)</div>
+        <div id="prizeEditor">
+          <div class="prize-row"><label>1ST</label><input type="number" class="prizeAmt" data-label="1ST" value="0" placeholder="0 = full pot" /></div>
+          <div class="prize-row"><label>2ND</label><input type="number" class="prizeAmt" data-label="2ND" value="0" placeholder="₦" /></div>
+        </div>
+        <button class="btn-sec" type="button" onclick="addPrizeRow()" style="margin-top:4px">+ Add position (3rd, 4th…)</button>
+        <p style="font-size:0.75rem;color:#64748b;margin:6px 0 10px">If only 1ST is set to 0, winner takes the full pot. With 3+ players set 1ST/2ND/3RD amounts.</p>
         <button class="btn-gold" onclick="createRoom()">Create Room</button>
       </div>
       <div class="box">
@@ -126,6 +165,8 @@
         <h3>Room Code</h3>
         <div class="room-code" id="roomCode">----</div>
         <p style="text-align:center;font-size:0.8rem;color:#94a3b8;margin-bottom:8px" id="roomStakeLabel"></p>
+        <div id="roomPrizes" style="font-size:0.8rem;color:#94a3b8;margin-bottom:10px;text-align:center"></div>
+        <div id="hostPrizeEdit" style="display:none;margin-bottom:10px"></div>
         <h3>Players (<span id="pCount">0</span>)</h3>
         <ul class="player-list" id="pList"></ul>
         <button class="btn-main" id="startBtn" onclick="startGame()" style="display:none">Start Game</button>
@@ -152,6 +193,12 @@
         <button class="btn-main" id="passBtn" onclick="passTurn()" disabled>Pass</button>
       </div>
     </div>
+  </div>
+
+  <div class="deal-overlay" id="dealOverlay">
+    <div class="shuffle-deck" id="shuffleDeck"></div>
+    <h2 id="dealTitle">Shuffling...</h2>
+    <p id="dealMsg" style="color:#94a3b8;font-size:0.9rem">Dealing cards</p>
   </div>
 
   <div class="winner-screen" id="winnerScreen">
@@ -308,9 +355,28 @@
       refreshRooms();
     }
 
+    function addPrizeRow() {
+      const ed = document.getElementById("prizeEditor");
+      const n = ed.querySelectorAll(".prize-row").length + 1;
+      const labels = { 1: "1ST", 2: "2ND", 3: "3RD" };
+      const label = labels[n] || (n + "TH");
+      const row = document.createElement("div");
+      row.className = "prize-row";
+      row.innerHTML = '<label>' + label + '</label><input type="number" class="prizeAmt" data-label="' + label + '" value="0" placeholder="₦" /><button class="btn-sec" style="width:auto;padding:8px 10px;margin:0" onclick="this.parentNode.remove()">✕</button>';
+      ed.appendChild(row);
+    }
+
+    function collectPrizes() {
+      return Array.from(document.querySelectorAll(".prizeAmt")).map(inp => ({
+        label: inp.getAttribute("data-label"),
+        amount: Number(inp.value) || 0
+      }));
+    }
+
     function createRoom() {
       const stake = document.getElementById("createStake").value;
-      socket.emit("create_room", { stake });
+      const prizes = collectPrizes();
+      socket.emit("create_room", { stake, prizes });
     }
     function joinRoom() {
       const code = document.getElementById("codeInput").value.toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -351,15 +417,67 @@
       if (s.gameOver) { showWinner(s); return; }
       if (s.started) {
         show("gameScreen");
+        if (s.dealing) {
+          document.getElementById("status").querySelector(".status-label") &&
+            (document.getElementById("status").querySelector(".status-label").textContent = "Dealing cards...");
+        }
         renderGame(s);
       } else {
         renderLobbyRoom(s);
       }
     });
 
+    socket.on("dealing_start", (data) => {
+      show("gameScreen");
+      const overlay = document.getElementById("dealOverlay");
+      const title = document.getElementById("dealTitle");
+      const msg = document.getElementById("dealMsg");
+      overlay.classList.add("show");
+      title.textContent = "Shuffling...";
+      msg.textContent = "Get ready";
+      // Brief shuffle, then deal one-by-one
+      setTimeout(() => {
+        title.textContent = "Dealing";
+        let i = 0;
+        const order = data.dealOrder || [];
+        function nextCard() {
+          if (i >= order.length) {
+            title.textContent = "Ready!";
+            msg.textContent = "Game starting...";
+            setTimeout(() => overlay.classList.remove("show"), 500);
+            return;
+          }
+          const item = order[i++];
+          msg.textContent = "Card to " + item.playerName + " (" + i + "/" + order.length + ")";
+          // Flying card visual from center
+          const el = document.createElement("div");
+          el.className = "deal-card";
+          el.textContent = item.card.num + " " + (SHAPE_ICON[item.card.shape] || "");
+          el.style.left = "50%";
+          el.style.top = "45%";
+          el.style.marginLeft = "-28px";
+          el.style.marginTop = "-40px";
+          // scatter toward bottom (your hand) or top (opponents)
+          const isMe = item.playerId === myId;
+          const dx = isMe ? ((i % 5) - 2) * 36 : ((i % 3) - 1) * 50;
+          const dy = isMe ? 160 : -140;
+          el.style.setProperty("--dx", dx + "px");
+          el.style.setProperty("--dy", dy + "px");
+          document.body.appendChild(el);
+          setTimeout(() => el.remove(), 400);
+          setTimeout(nextCard, 280);
+        }
+        nextCard();
+      }, 900);
+    });
+
     function renderLobbyRoom(s) {
       document.getElementById("roomCode").textContent = s.code;
-      document.getElementById("roomStakeLabel").textContent = s.stake ? ("Table stake ₦" + s.stake) : "No stake";
+      document.getElementById("roomStakeLabel").textContent = s.stake ? ("Table stake ₦" + s.stake + " · pot ₦" + (s.stake * s.players.length)) : "No stake";
+      const rp = document.getElementById("roomPrizes");
+      if (s.prizes && s.prizes.length) {
+        rp.innerHTML = s.prizes.map(pr => pr.label + ": ₦" + (pr.amount || 0).toLocaleString()).join(" · ");
+      } else rp.innerHTML = "";
       document.getElementById("pCount").textContent = s.players.length;
       document.getElementById("pList").innerHTML = s.players.map(p =>
         `<li><span class="${p.id===myId?'you':''}">${p.name}${p.id===myId?' (you)':''}</span>${p.id===s.hostId?'<span class="host-tag">HOST</span>':''}</li>`
@@ -429,9 +547,22 @@
     }
 
     function renderGame(s) {
-      const isMyTurn = s.players[s.current] && s.players[s.current].id === myId;
+      const isMyTurn = !s.dealing && s.players[s.current] && s.players[s.current].id === myId;
       const st = document.getElementById("status");
       const playerName = s.players[s.current]?.name || "...";
+      if (s.dealing) {
+        stopCountdown();
+        let labelNode = st.querySelector(".status-label");
+        if (!labelNode) {
+          labelNode = document.createElement("div");
+          labelNode.className = "status-label";
+          st.insertBefore(labelNode, st.firstChild);
+        }
+        labelNode.textContent = "Dealing cards...";
+        st.className = "status";
+        document.getElementById("timerBar").style.display = "none";
+        document.getElementById("timerText").style.display = "none";
+      }
       // Clear only the label part - timer children stay
       const label = (s.pendingPick > 0 && isMyTurn)
         ? ("You must Pick " + s.pendingPick)
@@ -486,11 +617,13 @@
     function showWinner(s) {
       document.getElementById("winnerTitle").textContent = s.winner + " Wins!";
       let msg = s.effect || "";
-      if (s.potPaid) msg += (msg ? "\n" : "") + "Pot ₦" + s.potPaid.toLocaleString() + " added to winner wallet";
-      document.getElementById("winnerMsg").textContent = msg;
-      if (me) {
-        document.getElementById("winnerMsg").textContent = msg + "\nYour wallet: ₦" + (me.balance || 0).toLocaleString();
+      if (s.payouts && s.payouts.length) {
+        msg = s.payouts.map(x => x.label + " " + x.name + " +₦" + x.amount.toLocaleString()).join(" · ");
+      } else if (s.potPaid) {
+        msg += (msg ? " · " : "") + "Pot ₦" + s.potPaid.toLocaleString();
       }
+      if (me) msg += " · Your wallet: ₦" + (me.balance || 0).toLocaleString();
+      document.getElementById("winnerMsg").textContent = msg;
       const box = document.getElementById("scoreBox");
       if (s.scores) {
         box.style.display = "block";

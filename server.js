@@ -135,8 +135,11 @@ function getRoomState(room, forSocketId) {
     winner: room.winner || null,
     scores: room.scores || null,
     potPaid: room.potPaid || 0,
+    payouts: room.payouts || null,
     winnerUsername: room.winnerUsername || null,
-    turnEndsAt: room.turnEndsAt || null
+    turnEndsAt: room.turnEndsAt || null,
+    prizes: room.prizes || null,
+    dealing: !!room.dealing
   };
 }
 
@@ -181,33 +184,49 @@ function advanceTurn(room) {
 
 function settleStake(room) {
   const stake = Number(room.stake) || 0;
-  if (stake <= 0 || !room.winner || room.stakeSettled) return;
+  if (stake <= 0 || room.stakeSettled) return;
   room.stakeSettled = true;
 
   const pot = stake * room.players.length;
   const users = loadUsers();
+  const prizes = room.prizes && room.prizes.length ? room.prizes : [{ key: "p0", label: "1ST", amount: 0 }];
 
-  // Find winner by display name or username
-  const winP = room.players.find(p =>
-    p.name === room.winner || p.username === room.winner
-  );
-
-  if (!winP || !winP.username || !users[winP.username]) {
-    console.log("settleStake: winner not found", room.winner);
-    return;
+  // Rank: winner (emptied hand) is 1st; others by lowest number-sum
+  const ranked = [];
+  if (room.winner) {
+    const winP = room.players.find(p => p.name === room.winner || p.username === room.winner);
+    if (winP) ranked.push(winP);
   }
+  const rest = room.players
+    .filter(p => !ranked.find(r => r.id === p.id))
+    .map(p => ({
+      p,
+      total: (room.hands[p.id] || []).reduce((s, c) => s + c.num, 0)
+    }))
+    .sort((a, b) => a.total - b.total)
+    .map(x => x.p);
+  ranked.push(...rest);
 
-  const before = users[winP.username].balance || 0;
-  users[winP.username].balance = before + pot;
+  const payouts = [];
+  let paidTotal = 0;
+  prizes.forEach((pr, i) => {
+    const player = ranked[i];
+    if (!player || !player.username || !users[player.username]) return;
+    // amount 0 on 1st with single prize = full pot
+    let amt = Number(pr.amount) || 0;
+    if (amt <= 0 && i === 0 && prizes.length === 1) amt = pot;
+    if (amt <= 0) return;
+    users[player.username].balance = (users[player.username].balance || 0) + amt;
+    paidTotal += amt;
+    payouts.push({ name: player.name, label: pr.label, amount: amt });
+  });
   saveUsers(users);
-  console.log("settleStake:", winP.username, before, "->", users[winP.username].balance, "pot", pot);
 
-  room.effect = (room.effect || room.winner + " wins!") +
-    " · Pot ₦" + pot.toLocaleString() + " paid to " + winP.name;
-  room.potPaid = pot;
-  room.winnerUsername = winP.username;
+  room.potPaid = paidTotal;
+  room.payouts = payouts;
+  room.effect = (room.effect || "Game over") + " · " +
+    payouts.map(x => x.label + " " + x.name + " +₦" + x.amount.toLocaleString()).join(" · ");
 
-  // Push updated balances to every player in the room
   room.players.forEach(p => {
     const sock = io.sockets.sockets.get(p.id);
     if (sock && users[p.username]) {
@@ -380,7 +399,7 @@ io.on("connection", (socket) => {
     socket.emit("auth_ok", publicUser(loadUsers()[u]));
   });
 
-  socket.on("create_room", ({ stake }) => {
+  socket.on("create_room", ({ stake, prizes }) => {
     const u = socketUser[socket.id];
     if (!u) return socket.emit("error_msg", "Login first");
     const users = loadUsers();
@@ -390,17 +409,40 @@ io.on("connection", (socket) => {
     if (tableStake > 0 && (acc.balance || 0) < tableStake) {
       return socket.emit("error_msg", "Need ₦" + tableStake + " in wallet to create table");
     }
+    // prizes: [{ label, amount }, ...] e.g. 1st/2nd/3rd profit amounts
+    let prizeList = Array.isArray(prizes) ? prizes.map((pr, i) => ({
+      key: "p" + i,
+      label: pr.label || ((i === 0 ? "1ST" : i === 1 ? "2ND" : i === 2 ? "3RD" : (i + 1) + "TH")),
+      amount: Math.max(0, Number(pr.amount) || 0)
+    })) : null;
+    if (!prizeList || !prizeList.length) {
+      // default: winner takes full pot (handled in settle)
+      prizeList = [{ key: "p0", label: "1ST", amount: 0 }]; // 0 means "full pot"
+    }
     let code = makeCode();
     while (rooms[code]) code = makeCode();
     rooms[code] = {
-      code, hostId: socket.id, stake: tableStake,
+      code, hostId: socket.id, stake: tableStake, prizes: prizeList,
       players: [{ id: socket.id, name: acc.username, username: u }],
       started: false, hands: {}, deck: [], discard: [], current: 0,
       pendingPick: 0, playAgain: false, effect: "", gameOver: false
     };
     socket.join(code);
     socket.roomCode = code;
-    socket.emit("room_created", { code, stake: tableStake });
+    socket.emit("room_created", { code, stake: tableStake, prizes: prizeList });
+    broadcastRoom(code);
+  });
+
+  socket.on("update_prizes", ({ prizes }) => {
+    const code = socket.roomCode;
+    const room = rooms[code];
+    if (!room || room.hostId !== socket.id || room.started) return;
+    if (!Array.isArray(prizes) || !prizes.length) return;
+    room.prizes = prizes.map((pr, i) => ({
+      key: "p" + i,
+      label: pr.label || ((i === 0 ? "1ST" : i === 1 ? "2ND" : i === 2 ? "3RD" : (i + 1) + "TH")),
+      amount: Math.max(0, Number(pr.amount) || 0)
+    }));
     broadcastRoom(code);
   });
 
@@ -463,18 +505,31 @@ io.on("connection", (socket) => {
     room.current = 0;
     room.pendingPick = 0;
     room.playAgain = false;
-    room.effect = room.stake ? ("Stake ₦" + room.stake + " · pot ₦" + (room.stake * room.players.length)) : "";
+    room.effect = "Shuffling & dealing...";
     room.gameOver = false;
     room.winner = null;
     room.scores = null;
     room.stakeSettled = false;
     room.potPaid = 0;
+    room.payouts = null;
     room.started = true;
+    room.dealing = true;
+    room.turnEndsAt = null;
 
-    room.players.forEach(p => {
-      room.hands[p.id] = [];
-      for (let i = 0; i < 5; i++) if (room.deck.length) room.hands[p.id].push(room.deck.pop());
-    });
+    room.players.forEach(p => { room.hands[p.id] = []; });
+
+    // Pre-deal into temp, then reveal one-by-one via client animation;
+    // server holds final hands and sends dealing_start with ordered cards
+    const dealOrder = []; // { playerId, card }
+    for (let round = 0; round < 5; round++) {
+      for (const p of room.players) {
+        if (room.deck.length) {
+          const card = room.deck.pop();
+          room.hands[p.id].push(card);
+          dealOrder.push({ playerId: p.id, playerName: p.name, card });
+        }
+      }
+    }
 
     let start = null;
     for (let i = 0; i < room.deck.length; i++) {
@@ -482,14 +537,36 @@ io.on("connection", (socket) => {
     }
     if (!start) start = room.deck.pop();
     room.discard.push(start);
+
+    // Empty hands on wire during animation – client animates; then full state
+    const fullHands = {};
+    room.players.forEach(p => { fullHands[p.id] = room.hands[p.id].slice(); room.hands[p.id] = []; });
+
     broadcastRoom(code);
-    startTurnTimer(code);
+    io.to(code).emit("dealing_start", {
+      dealOrder,
+      topCard: start,
+      players: room.players.map(p => ({ id: p.id, name: p.name }))
+    });
+
+    // After animation (~ dealOrder.length * 280ms + buffer), restore hands and start play
+    const animMs = Math.min(8000, dealOrder.length * 280 + 1200);
+    setTimeout(() => {
+      if (!rooms[code]) return;
+      room.players.forEach(p => { room.hands[p.id] = fullHands[p.id] || []; });
+      room.dealing = false;
+      room.effect = room.stake
+        ? ("Stake ₦" + room.stake + " · pot ₦" + (room.stake * room.players.length))
+        : "Game on!";
+      broadcastRoom(code);
+      startTurnTimer(code);
+    }, animMs);
   });
 
   socket.on("play_card", ({ cardId }) => {
     const code = socket.roomCode;
     const room = rooms[code];
-    if (!room || !room.started || room.gameOver) return;
+    if (!room || !room.started || room.gameOver || room.dealing) return;
     clearTurnTimer(code);
     const playerIdx = room.players.findIndex(p => p.id === socket.id);
     if (playerIdx !== room.current) return;
@@ -538,7 +615,7 @@ io.on("connection", (socket) => {
   socket.on("draw_card", () => {
     const code = socket.roomCode;
     const room = rooms[code];
-    if (!room || !room.started || room.gameOver) return;
+    if (!room || !room.started || room.gameOver || room.dealing) return;
     clearTurnTimer(code);
     const playerIdx = room.players.findIndex(p => p.id === socket.id);
     if (playerIdx !== room.current) return;
