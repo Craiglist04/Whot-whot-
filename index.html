@@ -4,416 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Whot Online</title>
-  <script src="/socket.io/socket.io.js">
-    // ========== VS COMPUTER (offline, no auth) ==========
-    const VS_CIRCLES   = [1,2,3,4,5,7,8,10,11,12,13,14];
-    const VS_TRIANGLES = [1,2,3,4,5,7,8,10,11,12,13,14];
-    const VS_CROSSES   = [1,2,3,5,7,10,11,13,14];
-    const VS_SQUARES   = [1,2,3,5,7,10,11,13,14];
-    const VS_STARS     = [1,2,3,4,5,7,8];
-
-    function vsSpecial(n) {
-      if (n === 1) return "holdon";
-      if (n === 2) return "pick2";
-      if (n === 8) return "suspension";
-      if (n === 14) return "general";
-      return null;
-    }
-    function vsShuffle(arr) {
-      const a = [...arr];
-      for (let p = 0; p < 3; p++)
-        for (let i = a.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [a[i], a[j]] = [a[j], a[i]];
-        }
-      return a;
-    }
-    function vsBuildDeck() {
-      const d = []; let id = 0;
-      VS_CIRCLES.forEach(n => d.push({ id: id++, shape: "circle", num: n, special: vsSpecial(n) }));
-      VS_TRIANGLES.forEach(n => d.push({ id: id++, shape: "triangle", num: n, special: vsSpecial(n) }));
-      VS_CROSSES.forEach(n => d.push({ id: id++, shape: "cross", num: n, special: vsSpecial(n) }));
-      VS_SQUARES.forEach(n => d.push({ id: id++, shape: "square", num: n, special: vsSpecial(n) }));
-      VS_STARS.forEach(n => d.push({ id: id++, shape: "star", num: n, special: vsSpecial(n) }));
-      return vsShuffle(d);
-    }
-
-    let vsMode = false;
-    let vs = null; // local game state
-    let vsTimer = null;
-    let vsEndsAt = 0;
-
-    function startVsComputer() {
-      vsMode = true;
-      document.getElementById("headerSub").textContent = "You vs Computer · no betting";
-      const deck = vsBuildDeck();
-      const you = [];
-      const cpu = [];
-      // 2 players → 5 each
-      for (let i = 0; i < 5; i++) {
-        if (deck.length) you.push(deck.pop());
-        if (deck.length) cpu.push(deck.pop());
-      }
-      let start = null;
-      for (let i = 0; i < deck.length; i++) {
-        if (!deck[i].special) { start = deck.splice(i, 1)[0]; break; }
-      }
-      if (!start) start = deck.pop();
-
-      vs = {
-        deck, discard: [start],
-        hands: { you, cpu },
-        current: "you",
-        pendingPick: 0,
-        playAgain: false,
-        skipNext: false,
-        gameOver: false,
-        effect: "Your turn",
-        winner: null,
-        scores: null
-      };
-
-      // Deal animation briefly then play
-      const overlay = document.getElementById("dealOverlay");
-      if (overlay) {
-        overlay.classList.add("show");
-        document.getElementById("dealTitle").textContent = "Shuffling...";
-        document.getElementById("dealMsg").textContent = "Dealing 5 cards each";
-        setTimeout(() => {
-          overlay.classList.remove("show");
-          show("gameScreen");
-          vsRender();
-          vsStartTimer();
-        }, 1200);
-      } else {
-        show("gameScreen");
-        vsRender();
-        vsStartTimer();
-      }
-    }
-
-    function vsTop() { return vs.discard[vs.discard.length - 1]; }
-    function vsIsAction(c) { return c && c.special; }
-
-    function vsCanPlay(card) {
-      if (vs.pendingPick > 0) return false;
-      const t = vsTop();
-      return card.shape === t.shape || card.num === t.num;
-    }
-
-    function vsStartTimer() {
-      if (vsTimer) clearInterval(vsTimer);
-      if (!vs || vs.gameOver) return;
-      vsEndsAt = Date.now() + 15000;
-      const total = 15000;
-      function tick() {
-        if (!vs || vs.gameOver) { clearInterval(vsTimer); return; }
-        const left = Math.max(0, vsEndsAt - Date.now());
-        const secs = Math.ceil(left / 1000);
-        const bar = document.getElementById("timerBar");
-        const fill = document.getElementById("timerFill");
-        const text = document.getElementById("timerText");
-        if (bar) {
-          bar.style.display = "block";
-          text.style.display = "block";
-          fill.style.width = ((left / total) * 100) + "%";
-          bar.className = "timer-bar" + (secs <= 5 ? " danger" : secs <= 10 ? " warn" : "");
-          if (vs.current === "you") {
-            text.textContent = vs.pendingPick ? ("Pick " + vs.pendingPick + " · " + secs + "s") : ("Your turn · " + secs + "s left");
-            text.style.color = secs <= 5 ? "#ef4444" : "#4ade80";
-          } else {
-            text.textContent = "Computer thinking · " + secs + "s";
-            text.style.color = "#94a3b8";
-          }
-        }
-        if (left <= 0) {
-          clearInterval(vsTimer);
-          if (vs.current === "you") vsAutoYou();
-        }
-      }
-      tick();
-      vsTimer = setInterval(tick, 200);
-    }
-
-    function vsRender() {
-      if (!vs) return;
-      const st = document.getElementById("status");
-      let label = st.querySelector(".status-label");
-      if (!label) {
-        label = document.createElement("div");
-        label.className = "status-label";
-        st.insertBefore(label, st.firstChild);
-      }
-      if (vs.gameOver) {
-        label.textContent = "Game over";
-        st.className = "status";
-      } else if (vs.current === "you") {
-        label.textContent = vs.pendingPick ? ("You must Pick " + vs.pendingPick) : "Your turn";
-        st.className = vs.pendingPick ? "status warn" : "status turn";
-      } else {
-        label.textContent = "Computer's turn";
-        st.className = "status";
-      }
-      document.getElementById("effect").textContent = vs.effect || "";
-      document.getElementById("opponents").innerHTML =
-        `<div class="opp ${vs.current==="cpu"?"active":""}"><div class="name">Computer</div><div style="color:#94a3b8">${vs.hands.cpu.length} cards</div></div>`;
-      document.getElementById("deckCount").textContent = vs.deck.length;
-      const top = vsTop();
-      const pile = document.getElementById("discard");
-      if (top) {
-        pile.className = "pile card " + top.shape;
-        pile.innerHTML = `<div class="num-tl">${top.num}</div><div class="shape">${SHAPE_ICON[top.shape]}</div><div class="num-br">${top.num}</div>`;
-      }
-      document.getElementById("handLabel").textContent = "Your cards";
-      const isYou = vs.current === "you" && !vs.gameOver;
-      document.getElementById("hand").innerHTML = vs.hands.you.map(c => {
-        const can = isYou && vsCanPlay(c);
-        return `<div class="card ${c.shape} ${can?"playable":"disabled"}" onclick="vsPlayCard(${c.id})">
-          <div class="num-tl">${c.num}</div><div class="shape">${SHAPE_ICON[c.shape]}</div><div class="num-br">${c.num}</div></div>`;
-      }).join("");
-      document.getElementById("passBtn").disabled = true; // draw always passes turn
-      document.getElementById("passBtn").style.display = "none";
-    }
-
-    function vsApplySpecial(card) {
-      vs.playAgain = false;
-      vs.skipNext = false;
-      if (card.special === "holdon") {
-        vs.playAgain = true;
-        vs.effect = "Hold On! Play again";
-      } else if (card.special === "pick2") {
-        vs.pendingPick = 2;
-        vs.effect = "Pick Two! Opponent must draw 2";
-      } else if (card.special === "suspension") {
-        vs.skipNext = true;
-        vs.effect = "Suspension – skip next";
-      } else if (card.special === "general") {
-        // opponent draws 1, you continue
-        if (vs.deck.length) {
-          if (vs.current === "you") vs.hands.cpu.push(vs.deck.pop());
-          else vs.hands.you.push(vs.deck.pop());
-        }
-        vs.playAgain = true;
-        vs.effect = "General Market – opponent draws 1, you continue";
-      }
-    }
-
-    function vsAdvance() {
-      if (vs.playAgain) {
-        vs.playAgain = false;
-        return; // same player continues
-      }
-      if (vs.skipNext) {
-        vs.skipNext = false;
-        return; // opponent skipped — same player continues
-      }
-      vs.current = vs.current === "you" ? "cpu" : "you";
-    }
-
-    function vsCheckWin(who) {
-      if (vs.hands[who].length === 0) {
-        vs.gameOver = true;
-        vs.winner = who === "you" ? "You" : "Computer";
-        vs.effect = vs.winner + " wins!";
-        vsShowWinner();
-        return true;
-      }
-      return false;
-    }
-
-    function vsTender() {
-      vs.gameOver = true;
-      const y = vs.hands.you.reduce((s, c) => s + c.num, 0);
-      const c = vs.hands.cpu.reduce((s, c) => s + c.num, 0);
-      vs.scores = [
-        { name: "You", total: y },
-        { name: "Computer", total: c }
-      ].sort((a, b) => a.total - b.total);
-      vs.winner = vs.scores[0].name;
-      vs.effect = "Market empty – lowest total wins";
-      vsShowWinner();
-    }
-
-    function vsShowWinner() {
-      if (vsTimer) clearInterval(vsTimer);
-      document.getElementById("winnerTitle").textContent = vs.winner + " Wins!";
-      document.getElementById("winnerMsg").textContent = vs.effect || "";
-      const box = document.getElementById("scoreBox");
-      if (vs.scores) {
-        box.style.display = "block";
-        box.innerHTML = vs.scores.map((sc, i) =>
-          `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #334155"><span>${i===0?"👑 ":""}${sc.name}</span><span>${sc.total} pts</span></div>`
-        ).join("");
-      } else box.style.display = "none";
-      // Change home button for vs mode
-      const homeBtn = document.querySelector("#winnerScreen .btn-main");
-      if (homeBtn) {
-        homeBtn.textContent = "Back to Menu";
-        homeBtn.onclick = () => {
-          document.getElementById("winnerScreen").classList.remove("show");
-          vsMode = false;
-          vs = null;
-          document.getElementById("passBtn").style.display = "";
-          document.getElementById("headerSub").textContent = "Play with friends on different phones";
-          show("authScreen");
-        };
-      }
-      document.getElementById("winnerScreen").classList.add("show");
-    }
-
-    function vsPlayCard(cardId) {
-      if (!vsMode || !vs || vs.gameOver || vs.current !== "you") return;
-      if (vs.pendingPick > 0) return;
-      const hand = vs.hands.you;
-      const idx = hand.findIndex(c => c.id === cardId);
-      if (idx < 0) return;
-      const card = hand[idx];
-      if (!vsCanPlay(card)) return;
-
-      hand.splice(idx, 1);
-      vs.discard.push(card);
-      vs.effect = "";
-      vs.playAgain = false;
-
-      if (hand.length === 0) {
-        if (vsIsAction(card)) {
-          if (vs.deck.length) {
-            hand.push(vs.deck.pop());
-            vs.effect = "Cannot finish with action – drew 1";
-            vsApplySpecial(card);
-            vsAdvance();
-            vsRender();
-            if (vs.current === "cpu") setTimeout(vsCpuTurn, 700);
-            else vsStartTimer();
-            return;
-          }
-        }
-        vs.gameOver = true;
-        vs.winner = "You";
-        vs.effect = "You win!";
-        vsShowWinner();
-        return;
-      }
-
-      vsApplySpecial(card);
-      vsAdvance();
-      vsRender();
-      if (vs.gameOver) return;
-      if (vs.current === "cpu") setTimeout(vsCpuTurn, 700);
-      else vsStartTimer();
-    }
-
-    function vsDraw() {
-      if (!vsMode || !vs || vs.gameOver || vs.current !== "you") return;
-
-      if (vs.pendingPick > 0) {
-        const need = vs.pendingPick;
-        for (let i = 0; i < need; i++) {
-          if (!vs.deck.length) { vsTender(); return; }
-          vs.hands.you.push(vs.deck.pop());
-        }
-        vs.pendingPick = 0;
-        vs.effect = "You picked " + need;
-        vs.current = "cpu";
-        vsRender();
-        setTimeout(vsCpuTurn, 700);
-        return;
-      }
-
-      // Must draw → always next player
-      if (!vs.deck.length) { vsTender(); return; }
-      vs.hands.you.push(vs.deck.pop());
-      vs.effect = "You drew – Computer's turn";
-      vs.current = "cpu";
-      vsRender();
-      setTimeout(vsCpuTurn, 700);
-    }
-
-    function vsAutoYou() {
-      if (!vs || vs.gameOver || vs.current !== "you") return;
-      if (vs.pendingPick > 0) { vsDraw(); return; }
-      const playable = vs.hands.you.filter(vsCanPlay);
-      if (playable.length) vsPlayCard(playable[0].id);
-      else vsDraw();
-    }
-
-    function vsCpuTurn() {
-      if (!vs || vs.gameOver || vs.current !== "cpu") return;
-      vsStartTimer();
-
-      setTimeout(() => {
-        if (!vs || vs.gameOver || vs.current !== "cpu") return;
-
-        if (vs.pendingPick > 0) {
-          const need = vs.pendingPick;
-          for (let i = 0; i < need; i++) {
-            if (!vs.deck.length) { vsTender(); return; }
-            vs.hands.cpu.push(vs.deck.pop());
-          }
-          vs.pendingPick = 0;
-          vs.effect = "Computer picked " + need;
-          vs.current = "you";
-          vsRender();
-          vsStartTimer();
-          return;
-        }
-
-        const playable = vs.hands.cpu.filter(vsCanPlay);
-        if (playable.length) {
-          // Prefer non-action if last card
-          playable.sort((a, b) => {
-            if (vs.hands.cpu.length === 1) {
-              if (a.special && !b.special) return 1;
-              if (!a.special && b.special) return -1;
-            }
-            return 0;
-          });
-          const card = playable[0];
-          const idx = vs.hands.cpu.indexOf(card);
-          vs.hands.cpu.splice(idx, 1);
-          vs.discard.push(card);
-          vs.effect = "Computer played " + card.num;
-          vs.playAgain = false;
-
-          if (vs.hands.cpu.length === 0) {
-            if (vsIsAction(card) && vs.deck.length) {
-              vs.hands.cpu.push(vs.deck.pop());
-              vs.effect = "Computer cannot finish with action";
-              vsApplySpecial(card);
-              vsAdvance();
-              vsRender();
-              if (vs.current === "cpu") setTimeout(vsCpuTurn, 600);
-              else vsStartTimer();
-              return;
-            }
-            vs.gameOver = true;
-            vs.winner = "Computer";
-            vs.effect = "Computer wins!";
-            vsShowWinner();
-            return;
-          }
-          vsApplySpecial(card);
-          vsAdvance();
-          vsRender();
-          if (vs.current === "cpu") setTimeout(vsCpuTurn, 600);
-          else vsStartTimer();
-          return;
-        }
-
-        // No play → draw and pass
-        if (!vs.deck.length) { vsTender(); return; }
-        vs.hands.cpu.push(vs.deck.pop());
-        vs.effect = "Computer drew – your turn";
-        vs.current = "you";
-        vsRender();
-        vsStartTimer();
-      }, 600);
-    }
-
-    // Hook deck click for vs mode
-    const _origDrawCard = typeof drawCard === "function" ? drawCard : null;
-
-  </script>
+  <script src="/socket.io/socket.io.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #0c1220; color: #e8eef7; min-height: 100vh; padding: 12px; user-select: none; }
@@ -1108,8 +699,8 @@
       const deck = vsBuildDeck();
       const you = [];
       const cpu = [];
-      // 2 players → 5 each
-      for (let i = 0; i < 5; i++) {
+      // You vs AI → 8 cards each
+      for (let i = 0; i < 8; i++) {
         if (deck.length) you.push(deck.pop());
         if (deck.length) cpu.push(deck.pop());
       }
@@ -1137,7 +728,7 @@
       if (overlay) {
         overlay.classList.add("show");
         document.getElementById("dealTitle").textContent = "Shuffling...";
-        document.getElementById("dealMsg").textContent = "Dealing 5 cards each";
+        document.getElementById("dealMsg").textContent = "Dealing 8 cards each";
         setTimeout(() => {
           overlay.classList.remove("show");
           show("gameScreen");
@@ -1248,10 +839,11 @@
         vs.effect = "Suspension – skip next";
       } else if (card.special === "general") {
         // opponent draws 1, you continue
-        if (vs.deck.length) {
+        if (vsNeedCard()) {
           if (vs.current === "you") vs.hands.cpu.push(vs.deck.pop());
           else vs.hands.you.push(vs.deck.pop());
         }
+        if (vs.gameOver) return;
         vs.playAgain = true;
         vs.effect = "General Market – opponent draws 1, you continue";
       }
@@ -1280,17 +872,40 @@
       return false;
     }
 
+    // VS AI ONLY: market empty → shuffle discard back into market
+    // Keep the open face-up card; players keep their hands. Play continues.
+    function vsRefillMarket() {
+      if (!vs) return false;
+      if (vs.discard.length <= 1) {
+        // Only the open card left — cannot refill → tender
+        vs.gameOver = true;
+        const y = vs.hands.you.reduce((s, c) => s + c.num, 0);
+        const ctot = vs.hands.cpu.reduce((s, c) => s + c.num, 0);
+        vs.scores = [
+          { name: "You", total: y },
+          { name: "Computer", total: ctot }
+        ].sort((a, b) => a.total - b.total);
+        vs.winner = vs.scores[0].name;
+        vs.effect = "No cards left to reshuffle – lowest total wins";
+        vsShowWinner();
+        return false;
+      }
+      const top = vs.discard[vs.discard.length - 1]; // stay face-up
+      const rest = vs.discard.slice(0, -1);         // all played cards under it
+      vs.deck = vsShuffle(rest);
+      vs.discard = [top];
+      vs.effect = "Market empty → played cards shuffled back (" + vs.deck.length + " cards)";
+      vsRender();
+      return true;
+    }
+
+    function vsNeedCard() {
+      if (vs.deck.length > 0) return true;
+      return vsRefillMarket();
+    }
+
     function vsTender() {
-      vs.gameOver = true;
-      const y = vs.hands.you.reduce((s, c) => s + c.num, 0);
-      const c = vs.hands.cpu.reduce((s, c) => s + c.num, 0);
-      vs.scores = [
-        { name: "You", total: y },
-        { name: "Computer", total: c }
-      ].sort((a, b) => a.total - b.total);
-      vs.winner = vs.scores[0].name;
-      vs.effect = "Market empty – lowest total wins";
-      vsShowWinner();
+      if (!vsNeedCard()) return; // tries refill; if fails, already showed winner
     }
 
     function vsShowWinner() {
@@ -1368,7 +983,7 @@
       if (vs.pendingPick > 0) {
         const need = vs.pendingPick;
         for (let i = 0; i < need; i++) {
-          if (!vs.deck.length) { vsTender(); return; }
+          if (!vsNeedCard()) return;
           vs.hands.you.push(vs.deck.pop());
         }
         vs.pendingPick = 0;
@@ -1380,7 +995,7 @@
       }
 
       // Must draw → always next player
-      if (!vs.deck.length) { vsTender(); return; }
+      if (!vsNeedCard()) return;
       vs.hands.you.push(vs.deck.pop());
       vs.effect = "You drew – Computer's turn";
       vs.current = "cpu";
@@ -1406,7 +1021,7 @@
         if (vs.pendingPick > 0) {
           const need = vs.pendingPick;
           for (let i = 0; i < need; i++) {
-            if (!vs.deck.length) { vsTender(); return; }
+            if (!vsNeedCard()) return;
             vs.hands.cpu.push(vs.deck.pop());
           }
           vs.pendingPick = 0;
@@ -1435,7 +1050,7 @@
           vs.playAgain = false;
 
           if (vs.hands.cpu.length === 0) {
-            if (vsIsAction(card) && vs.deck.length) {
+            if (vsIsAction(card) && vsNeedCard()) {
               vs.hands.cpu.push(vs.deck.pop());
               vs.effect = "Computer cannot finish with action";
               vsApplySpecial(card);
@@ -1460,7 +1075,7 @@
         }
 
         // No play → draw and pass
-        if (!vs.deck.length) { vsTender(); return; }
+        if (!vsNeedCard()) return;
         vs.hands.cpu.push(vs.deck.pop());
         vs.effect = "Computer drew – your turn";
         vs.current = "you";
